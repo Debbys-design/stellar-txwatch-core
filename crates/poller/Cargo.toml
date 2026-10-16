@@ -6,6 +6,8 @@ edition = "2021"
 [features]
 # Enable Prometheus metrics counters and optional /metrics HTTP endpoint.
 metrics = ["dep:prometheus", "dep:hyper", "dep:hyper-util", "dep:http-body-util"]
+# Enable the /health HTTP endpoint (served alongside /metrics).
+health = ["dep:hyper", "dep:hyper-util", "dep:http-body-util"]
 
 [dependencies]
 txwatch-config   = { path = "../config" }

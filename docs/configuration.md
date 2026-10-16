@@ -1,149 +1,114 @@
-# Configuration Reference
+# Configuration
 
-Config is a TOML file passed via `--config` (default: `config/example.toml`).
+TxWatch is configured through a combination of CLI flags, environment variables, and
+an optional TOML configuration file. This document describes the available options
+and how they interact.
 
-## Top-level fields
+## CLI flags
 
-| Field                   | Type | Required | Description                           |
-|-------------------------|------|----------|---------------------------------------|
-| `poll_interval_seconds` | u64  | yes      | How often to poll Horizon (seconds). Must be >= 5 and ≤ 3600. |
-
-> **Horizon rate limits:** Polling too frequently across many contracts can exhaust Horizon's per-IP request quota,
-> resulting in `429 Too Many Requests` responses. Sustained polling across six or more contracts at intervals below
-> 10 seconds is known to trigger rate limiting in production. The recommended minimum is
-> `poll_interval_seconds = 10`; for high-volume deployments with many contracts, `poll_interval_seconds = 30` or
-> higher is advised. TxWatch logs a startup warning when `poll_interval_seconds < 10` and more than 5 contracts
-> are configured.
-
-> **Contract limit:** A maximum of **100** `[[contracts]]` entries are allowed per configuration file. Exceeding this limit is rejected at startup to prevent exhausting memory or file descriptors from too many concurrent Horizon polling tasks.
-
-## `[[contracts]]`
-
-Each entry defines one watched Soroban contract. At least one entry is required.
-
-| Field         | Type   | Required | Description                                                  |
-|---------------|--------|----------|--------------------------------------------------------------|
-| `label`       | string | yes      | Human-readable name shown in logs and alert payloads.        |
-| `contract_id` | string | yes      | Stellar C-address (56 chars, starts with `C`).               |
-| `network`     | string | yes      | `mainnet`, `testnet`, or `futurenet`.                        |
-| `webhook_url` | string | yes      | `http://` or `https://` endpoint that receives alert JSON.   |
-| `webhook_secret` | string | no    | If set, an HMAC-SHA256 signature of the request body is sent as `X-TxWatch-Signature: sha256=<hmac>`. Never sends the raw secret over the wire. |
-
-### Network field values
-
-Valid `network` values and their corresponding Horizon endpoints:
-
-| Value | Horizon URL |
-|---|---|
-| `mainnet` | https://horizon.stellar.org |
-| `testnet` | https://horizon-testnet.stellar.org |
-| `futurenet` | https://horizon-futurenet.stellar.org |
-
-Any value outside this list will cause a TOML parse error. For example:
-
-```
-Error: unknown variant `main`, expected one of `mainnet`, `testnet`, `futurenet`
-```
-
-To fix: replace your `network` value with one of the valid values listed above.
-
-## `[[contracts.rules]]`
-
-At least one rule is required per contract. All matching rules fire independently.
-
-### `AnyTransaction`
-Fires on every transaction that appears in the contract's Horizon history.
-
-```toml
-[[contracts.rules]]
-type = "AnyTransaction"
-```
-
-### `TransactionFailed`
-Fires when `successful = false`.
-
-```toml
-[[contracts.rules]]
-type = "TransactionFailed"
-```
-
-### `LargeTransfer`
-Fires when the payment amount ≥ `threshold_xlm` XLM.
-
-```toml
-[[contracts.rules]]
-type          = "LargeTransfer"
-threshold_xlm = 10000          # must be > 0
-```
-
-### `FunctionCalled`
-Fires when the Soroban invocation calls exactly `function_name` (case-sensitive).
-
-```toml
-[[contracts.rules]]
-type          = "FunctionCalled"
-function_name = "withdraw"
-```
-
-### `AdminFunctionCalled`
-Fires when the invoked function is any entry in `function_names`.
-
-```toml
-[[contracts.rules]]
-type           = "AdminFunctionCalled"
-function_names = ["set_admin", "upgrade", "initialize"]
-```
-
-## Webhook payload
-
-```json
-{
-  "label":            "My Escrow Contract",
-  "contract_id":      "CAAA...",
-  "network":          "testnet",
-  "rule_triggered":   "LargeTransfer(>=10000XLM)",
-  "transaction_hash": "abc123...",
-  "function_name":    "transfer",
-  "function_names":   ["transfer"],
-  "amount_xlm":       15000,
-  "timestamp":        1705316096,
-  "horizon_link":     "https://horizon-testnet.stellar.org/transactions/abc123...",
-  "explorer_link":    "https://stellar.expert/explorer/testnet/tx/abc123..."
-}
-```
-
-- `function_name` — the first invoked Soroban function name (present for backward compatibility).
-- `function_names` — all Soroban function names invoked in the transaction (one per `invoke_host_function` operation). Most transactions have zero or one entry.
+| Flag | Description | Default |
+| --- | --- | --- |
+| `--rpc-url <URL>` | Soroban RPC endpoint used to poll contract events. | `http://localhost:8000/soroban/rpc` |
+| `--start-ledger <N>` | Ledger to start polling from. | latest |
+| `--poll-interval <SECS>` | Seconds between polling rounds. | `5` |
+| `--contract <ID>` | Contract ID to watch. May be repeated. | none |
+| `--features <LIST>` | Comma-separated feature list (e.g. `metrics`). | none |
 
 ## Environment variables
 
-| Variable   | Default | Description                                      |
-|------------|---------|--------------------------------------------------|
-| `RUST_LOG` | `info`  | Log level: `error`, `warn`, `info`, `debug`, `trace` |
+| Variable | Description |
+| --- | --- |
+| `TXWATCH_RPC_URL` | Overrides `--rpc-url`. |
+| `TXWATCH_POLL_INTERVAL` | Overrides `--poll-interval`. |
+| `TXWATCH_METRICS_PORT` | Port used by the observability HTTP server. |
 
-Note: setting `RUST_LOG=debug` will show per-contract idle poll cycles — the
-poller emits `"no new transactions"` debug logs with the contract `label` and
-current `cursor` when a poll returns an empty page.
+## Observability endpoints
 
-## Full example
+When the `metrics` feature is enabled, TxWatch starts a small HTTP server that
+exposes both the Prometheus metrics endpoint and a JSON health endpoint on the
+same port (default `9090`, configurable via `TXWATCH_METRICS_PORT`).
+
+### `GET /metrics`
+
+Prometheus text exposition format. Scrape this endpoint with your Prometheus
+server or any compatible agent.
+
+### `GET /health`
+
+Returns HTTP `200` with a JSON body when TxWatch is running:
+
+```json
+{"status": "ok", "version": "0.4.0", "contracts": 3, "uptime_seconds": 3600}
+```
+
+| Field | Description |
+| --- | --- |
+| `status` | `"ok"` while the poller is healthy. |
+| `version` | The running TxWatch version. |
+| `contracts` | Number of contracts currently being watched. |
+| `uptime_seconds` | Seconds since the poller started. |
+
+This endpoint is intended for container orchestration systems and load balancers
+that need a lightweight liveness/readiness signal.
+
+## Kubernetes probes
+
+Because `/health` returns `200` only while the poller is running, it can be used
+directly for both liveness and readiness probes. The following example assumes the
+observability server is listening on port `9090`:
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: txwatch-poller
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: txwatch-poller
+  template:
+    metadata:
+      labels:
+        app: txwatch-poller
+    spec:
+      containers:
+        - name: txwatch-poller
+          image: txwatch/poller:0.4.0
+          args: ["--features", "metrics"]
+          ports:
+            - name: observability
+              containerPort: 9090
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: observability
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: observability
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+```
+
+If you expose the observability server on a different port, update
+`containerPort` and the probe `port` values accordingly.
+
+## Configuration file
+
+A TOML file may be supplied with `--config <PATH>`. CLI flags take precedence over
+values in the file, and environment variables take precedence over both.
 
 ```toml
-poll_interval_seconds = 10
+rpc_url = "https://soroban-testnet.stellar.org"
+poll_interval = 5
 
 [[contracts]]
-label       = "My Escrow Contract"
-contract_id = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-network     = "testnet"
-webhook_url = "https://hooks.example.com/my-webhook"
-
-  [[contracts.rules]]
-  type          = "LargeTransfer"
-  threshold_xlm = 10000
-
-  [[contracts.rules]]
-  type           = "AdminFunctionCalled"
-  function_names = ["set_admin", "upgrade", "initialize"]
-
-  [[contracts.rules]]
-  type = "TransactionFailed"
+id = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4"
 ```
